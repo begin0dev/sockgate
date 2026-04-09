@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/crates/oxc_linter/src/rules.rs",
+  "plugins": ["typescript"],
+  "rules": {
+    "no-unused-vars": "warn",
+    "no-undef": "off",
+    "typescript/no-explicit-any": "warn",
+    "typescript/no-non-null-assertion": "warn"
+  },
+  "env": {
+    "browser": true,
+    "es2016": true
+  }
+}
