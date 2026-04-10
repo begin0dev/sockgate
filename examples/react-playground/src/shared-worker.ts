@@ -1,7 +1,7 @@
 /// <reference lib="webworker" />
 
 import { WorkerCore } from 'sockgate/worker';
-import {SocketClient} from "sockgate";
+import { SocketClient } from 'sockgate';
 
 declare const self: SharedWorkerGlobalScope;
 

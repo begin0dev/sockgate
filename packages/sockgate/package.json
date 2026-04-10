@@ -1,6 +1,6 @@
 {
   "name": "@begin0dev/sockgate",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Lightweight WebSocket client with auto-reconnect and SharedWorker-based cross-tab connection sharing.",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
