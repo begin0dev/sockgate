@@ -22,7 +22,7 @@ pnpm add @begin0dev/sockgate
 ### 기본 (SocketClient)
 
 ```ts
-import { SocketClient, ConnectionState } from 'sockgate';
+import { SocketClient, ConnectionState } from '@begin0dev/sockgate';
 
 const client = new SocketClient({
   url: 'wss://example.com/ws',
@@ -103,8 +103,8 @@ SharedWorker를 사용하면 여러 탭이 하나의 WebSocket 연결을 공유�
 
 ```ts
 // worker.ts (빌드 후 /worker.js 로 서빙)
-import { WorkerCore } from 'sockgate/worker';
-import type { SocketClientOptions } from 'sockgate/worker';
+import { WorkerCore } from '@begin0dev/sockgate/worker';
+import type { SocketClientOptions } from '@begin0dev/sockgate/worker';
 
 const options: SocketClientOptions = {
   url: 'wss://example.com/ws',
@@ -117,11 +117,10 @@ new WorkerCore(options);
 #### 2. 메인 스레드에서 SharedWorkerClient 사용
 
 ```ts
-import { SharedWorkerClient } from 'sockgate';
+import { SharedWorkerClient } from '@begin0dev/sockgate';
 
 const client = new SharedWorkerClient({
-  sharedWorkerUrl: '/worker.js',   // 위에서 빌드한 워커 스크립트 경로
-  // 또는 sharedWorkerFactory: () => new SharedWorker('/worker.js', { type: 'module' })
+  sharedWorkerFactory: () => new SharedWorker('/worker.js', { type: 'module' }),
   autoReconnect: true, // 탭 포커스/온라인 복귀 시 포트 재부착 (기본: true)
 });
 
@@ -201,12 +200,12 @@ interface HeartbeatContext {
 
 ```ts
 // 메인 엔트리
-import { SocketClient, SharedWorkerClient, ConnectionState } from 'sockgate';
-import type { SocketClientOptions, SharedWorkerClientOptions, ISocketClient, SocketEventMap, SubscribeData } from 'sockgate';
+import { SocketClient, SharedWorkerClient, ConnectionState } from '@begin0dev/sockgate';
+import type { SocketClientOptions, SharedWorkerClientOptions, ISocketClient, SocketEventMap, SubscribeData } from '@begin0dev/sockgate';
 
 // SharedWorker 엔트리 (워커 스크립트 전용)
-import { WorkerCore } from 'sockgate/worker';
-import type { SocketClientOptions } from 'sockgate/worker';
+import { WorkerCore } from '@begin0dev/sockgate/worker';
+import type { SocketClientOptions } from '@begin0dev/sockgate/worker';
 ```
 
 ## 개발
