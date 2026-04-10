@@ -1,6 +1,6 @@
 {
   "name": "@begin0dev/sockgate",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Lightweight WebSocket client with auto-reconnect and SharedWorker-based cross-tab connection sharing.",
   "main": "dist/cjs/index.js",
   "module": "dist/esm/index.js",
@@ -44,7 +44,7 @@
     "auto-reconnect",
     "cross-tab"
   ],
-  "author": "",
+  "author": "begin0dev",
   "license": "MIT",
   "repository": {
     "type": "git",
