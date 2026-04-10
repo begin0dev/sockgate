@@ -14,7 +14,7 @@
 ## 설치
 
 ```bash
-pnpm add sockgate
+pnpm add @begin0dev/sockgate
 ```
 
 ## 사용법
