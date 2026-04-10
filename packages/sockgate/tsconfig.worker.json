@@ -1,0 +1,11 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "outDir": "dist/worker",
+    "lib": ["ES2022", "DOM", "WebWorker"]
+  },
+  "include": ["src/worker.ts", "src/shared-worker/worker-core.ts", "src/types.ts", "src/event-emitter.ts", "src/socket-manager.ts"],
+  "exclude": ["src/shared-worker/worker-script.ts", "src/__tests__"]
+}

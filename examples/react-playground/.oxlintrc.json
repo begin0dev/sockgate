@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/oxc-project/oxc/main/crates/oxc_linter/src/rules.rs",
+  "plugins": ["react", "react-hooks", "typescript"],
+  "env": {
+    "browser": true,
+    "es2020": true
+  },
+  "ignore": ["dist"]
+}

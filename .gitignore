@@ -1,13 +1,21 @@
-/tmp
-/out-tsc
+# build outputs
 /dist
+**/dist
 *.tgz
-.DS_Store
-.idea
 
-/node_modules
+# dependencies
+**/node_modules
+/.pnp
+.pnp.js
+
+# logs
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-/.pnp
-.pnp.js
+pnpm-debug.log*
+
+# IDE / OS
+.idea
+.DS_Store
+/tmp
+/out-tsc

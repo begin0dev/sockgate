@@ -1,12 +1,12 @@
 import {
   ConnectionState,
-  type IManager,
   type SocketClientOptions,
+  type HeartbeatContext,
   type SocketEventMap,
 } from './types';
 import type { EventEmitter } from './event-emitter';
 
-export class SocketManager implements IManager {
+export class SocketManager {
   #ws: WebSocket | null = null;
   #state: ConnectionState = ConnectionState.CLOSED;
   #intentionalClose = false;
@@ -15,7 +15,10 @@ export class SocketManager implements IManager {
   #attempt = 0;
   readonly #options: SocketClientOptions;
   readonly #emitter: EventEmitter<SocketEventMap>;
-  static readonly #closeWatchdogMs = 3000;
+  #heartbeatCleanup: (() => void) | null = null;
+  #heartbeatMessageListeners: ((event: MessageEvent) => void) | null = null;
+
+  static readonly #closeWatchdogMs = 3_000;
 
   constructor(options: SocketClientOptions, emitter: EventEmitter<SocketEventMap>) {
     this.#options = options;
@@ -42,6 +45,7 @@ export class SocketManager implements IManager {
       this.#attempt = 0;
       this.#setState(ConnectionState.OPEN);
       this.#emitter.emit('open', undefined);
+      this.#startHeartbeat();
     };
 
     this.#ws.onclose = (event) => {
@@ -57,10 +61,10 @@ export class SocketManager implements IManager {
     };
 
     this.#ws.onmessage = (event) => {
-      this.#emitter.emit('message', event);
+      this.#handleMessage(event);
     };
 
-    if (this.#options.autoReconnect !== false) {
+    if (this.#options.reconnect) {
       this.#bindBrowserEvents();
     }
   }
@@ -68,6 +72,7 @@ export class SocketManager implements IManager {
   close(code?: number, reason?: string): void {
     this.#intentionalClose = true;
     this.#clearRetryTimer();
+    this.#clearHeartbeat();
     this.#unbindBrowserEvents();
 
     if (!this.#ws) {
@@ -75,10 +80,26 @@ export class SocketManager implements IManager {
       return;
     }
     this.#setState(ConnectionState.CLOSING);
-    try {
-      this.#ws.close(code, reason);
-    } catch {
-      // noop — 어차피 아래 handleClose로 정리
+
+    const ws = this.#ws;
+    if (ws.readyState === WebSocket.CONNECTING) {
+      ws.addEventListener(
+        'open',
+        () => {
+          try {
+            ws.close(code, reason);
+          } catch {
+            // noop
+          }
+        },
+        { once: true },
+      );
+    } else {
+      try {
+        ws.close(code, reason);
+      } catch {
+        // noop
+      }
     }
 
     this.#closeWatchdog = setTimeout(() => {
@@ -91,6 +112,7 @@ export class SocketManager implements IManager {
     if (this.#state === ConnectionState.CLOSED) return;
 
     this.#clearCloseWatchdog();
+    this.#clearHeartbeat();
     this.#emitter.emit('close', payload);
     this.#clearWs();
     this.#setState(ConnectionState.CLOSED);
@@ -102,20 +124,60 @@ export class SocketManager implements IManager {
     }
   }
 
-  send(data: string | ArrayBuffer | Blob): void {
+  #handleMessage(event: MessageEvent): void {
+    this.#heartbeatMessageListeners?.(event);
+    this.#emitter.emit('message', event);
+  }
+
+  send(data: string | ArrayBuffer | Blob | ArrayBufferView): void {
     if (this.#state !== ConnectionState.OPEN || !this.#ws) {
       throw new Error('WebSocket is not open');
     }
-    this.#ws.send(data);
+    this.#ws.send(data as Parameters<WebSocket['send']>[0]);
+  }
+
+  #startHeartbeat(): void {
+    if (!this.#options.heartbeat) return;
+
+    const ctx: HeartbeatContext = {
+      send: (data) => {
+        if (this.#state === ConnectionState.OPEN && this.#ws) {
+          try {
+            this.#ws.send(data as Parameters<WebSocket['send']>[0]);
+          } catch {
+            // noop
+          }
+        }
+      },
+      onMessage: (handler) => {
+        this.#heartbeatMessageListeners = handler;
+        return () => (this.#heartbeatMessageListeners = null);
+      },
+      reconnect: () => {
+        this.close(4000, 'heartbeat');
+        setTimeout(() => {
+          if (this.#state === ConnectionState.CLOSED) this.connect();
+        }, 0);
+      },
+    };
+
+    const cleanup = this.#options.heartbeat(ctx);
+    this.#heartbeatCleanup = cleanup ?? null;
+  }
+
+  #clearHeartbeat(): void {
+    this.#heartbeatCleanup?.();
+    this.#heartbeatCleanup = null;
+    this.#heartbeatMessageListeners = null;
   }
 
   #nextDelay(): number | null {
-    const maxAttempts = this.#options.reconnectionAttempts ?? Infinity;
+    const maxAttempts = this.#options.reconnect?.attempts ?? Infinity;
     if (this.#attempt >= maxAttempts) return null;
 
-    const baseDelay = this.#options.reconnectionDelay ?? 1000;
-    const maxDelay = this.#options.reconnectionDelayMax ?? 30000;
-    const factor = this.#options.randomizationFactor ?? 0.5;
+    const baseDelay = this.#options.reconnect?.delay ?? 1000;
+    const maxDelay = this.#options.reconnect?.delayMax ?? 30000;
+    const factor = this.#options.reconnect?.factor ?? 0.5;
 
     const exponential = baseDelay * Math.pow(2, this.#attempt);
     const capped = Math.min(exponential, maxDelay);
@@ -153,15 +215,23 @@ export class SocketManager implements IManager {
   };
 
   #bindBrowserEvents(): void {
-    document.addEventListener('visibilitychange', this.#onVisibilityOrFocus);
-    window.addEventListener('focus', this.#onVisibilityOrFocus);
-    window.addEventListener('online', this.#onVisibilityOrFocus);
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this.#onVisibilityOrFocus);
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('focus', this.#onVisibilityOrFocus);
+      window.addEventListener('online', this.#onVisibilityOrFocus);
+    }
   }
 
   #unbindBrowserEvents(): void {
-    document.removeEventListener('visibilitychange', this.#onVisibilityOrFocus);
-    window.removeEventListener('focus', this.#onVisibilityOrFocus);
-    window.removeEventListener('online', this.#onVisibilityOrFocus);
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this.#onVisibilityOrFocus);
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('focus', this.#onVisibilityOrFocus);
+      window.removeEventListener('online', this.#onVisibilityOrFocus);
+    }
   }
 
   #setState(newState: ConnectionState): void {

@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { SocketManager } from '../socket-manager';
 import { EventEmitter } from '../event-emitter';
-import { ConnectionState, type SocketEventMap } from '../types';
+import { ConnectionState, type HeartbeatContext, type SocketEventMap } from '../types';
 
 // ─── WebSocket Mock ───────────────────────────────────────────────────────────
 
@@ -24,6 +24,15 @@ class MockWebSocket {
     this.readyState = WebSocket.CLOSING;
   });
 
+  private readonly _listeners: Record<string, Array<() => void>> = {};
+  addEventListener(type: string, cb: () => void) {
+    if (!this._listeners[type]) this._listeners[type] = [];
+    this._listeners[type].push(cb);
+  }
+  removeEventListener(type: string, cb: () => void) {
+    this._listeners[type] = (this._listeners[type] ?? []).filter((f) => f !== cb);
+  }
+
   constructor(url: string) {
     this.url = url;
     MockWebSocket.instances.push(this);
@@ -32,6 +41,7 @@ class MockWebSocket {
   simulateOpen() {
     this.readyState = WebSocket.OPEN;
     this.onopen?.();
+    (this._listeners['open'] ?? []).forEach((cb) => cb());
   }
 
   simulateClose(code = 1000, reason = '', wasClean = true) {
@@ -50,25 +60,37 @@ class MockWebSocket {
 
 // ─── 헬퍼 ────────────────────────────────────────────────────────────────────
 
+/** afterEach에서 close()로 브라우저 이벤트 리스너를 정리하기 위해 추적 */
+const managersToCleanup: SocketManager[] = [];
+
+/**
+ * reconnect 옵션을 포함한 기본 SocketManager 생성.
+ * reconnect 옵션이 있으면 브라우저 이벤트도 함께 바인딩된다.
+ */
 function createManager(
   options: {
     reconnectionAttempts?: number;
     reconnectionDelay?: number;
-    autoReconnect?: boolean;
+    withReconnect?: boolean; // false면 reconnect 옵션 자체를 생략 → 브라우저 이벤트 미바인딩
   } = {},
 ) {
   const emitter = new EventEmitter<SocketEventMap>();
+  const withReconnect = options.withReconnect !== false;
   const manager = new SocketManager(
     {
       url: 'ws://localhost',
-      reconnectionDelay: options.reconnectionDelay ?? 100,
-      reconnectionDelayMax: 100,
-      randomizationFactor: 0,
-      reconnectionAttempts: options.reconnectionAttempts ?? Infinity,
-      autoReconnect: options.autoReconnect ?? false,
+      reconnect: withReconnect
+        ? {
+            delay: options.reconnectionDelay ?? 100,
+            delayMax: 100,
+            factor: 0,
+            attempts: options.reconnectionAttempts ?? Infinity,
+          }
+        : undefined,
     },
     emitter,
   );
+  managersToCleanup.push(manager);
   return { manager, emitter };
 }
 
@@ -85,6 +107,12 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // 브라우저 이벤트 리스너 누수 방지: 모든 manager의 이벤트 바인딩 해제
+  for (const m of managersToCleanup) {
+    m.close();
+  }
+  managersToCleanup.length = 0;
+
   vi.unstubAllGlobals();
   vi.useRealTimers();
 });
@@ -157,6 +185,7 @@ describe('SocketManager', () => {
       const onMessage = vi.fn();
       emitter.on('message', onMessage);
       manager.connect();
+      lastWs().simulateOpen();
       lastWs().simulateMessage('payload');
       expect(onMessage).toHaveBeenCalledOnce();
       expect(onMessage.mock.calls[0][0].data).toBe('payload');
@@ -227,7 +256,6 @@ describe('SocketManager', () => {
       manager.close(1000, 'bye');
       expect(manager.state).toBe(ConnectionState.CLOSING);
 
-      // onclose를 의도적으로 발생시키지 않음 (네트워크 죽은 상황 시뮬레이션)
       vi.advanceTimersByTime(3000);
 
       expect(manager.state).toBe(ConnectionState.CLOSED);
@@ -243,10 +271,9 @@ describe('SocketManager', () => {
       lastWs().simulateOpen();
       const ws = lastWs();
       manager.close();
-      vi.advanceTimersByTime(3000); // watchdog 발동
+      vi.advanceTimersByTime(3000);
       expect(onClose).toHaveBeenCalledTimes(1);
 
-      // 뒤늦게 실제 onclose가 도착 — 이미 핸들러가 null이므로 무시
       ws.onclose?.({ code: 1006, reason: '', wasClean: false });
       expect(onClose).toHaveBeenCalledTimes(1);
     });
@@ -293,12 +320,12 @@ describe('SocketManager', () => {
       const { manager } = createManager();
       manager.connect();
       lastWs().simulateOpen();
-      lastWs().simulateClose(1006, '', false); // retry 타이머 설정
+      lastWs().simulateClose(1006, '', false);
 
       manager.close();
       const prevCount = MockWebSocket.instances.length;
       vi.runAllTimers();
-      expect(MockWebSocket.instances.length).toBe(prevCount); // 새 연결 없음
+      expect(MockWebSocket.instances.length).toBe(prevCount);
     });
 
     it('CONNECTING 중 close() 호출 시 CLOSING이 되고 watchdog 발동 후 CLOSED가 된다', () => {
@@ -357,7 +384,7 @@ describe('SocketManager', () => {
       expect(MockWebSocket.instances).toHaveLength(2);
     });
 
-    it('reconnectionAttempts 소진 시 reconnectFailed 이벤트를 emit하고 CLOSED가 된다', () => {
+    it('reconnect.attempts 소진 시 reconnectFailed 이벤트를 emit하고 CLOSED가 된다', () => {
       const { manager, emitter } = createManager({ reconnectionAttempts: 2 });
       const onFailed = vi.fn();
       emitter.on('reconnectFailed', onFailed);
@@ -407,9 +434,9 @@ describe('SocketManager', () => {
     });
   });
 
-  describe('autoReconnect 브라우저 이벤트', () => {
+  describe('브라우저 이벤트 재연결 (reconnect 옵션 제공 시)', () => {
     it('visibilitychange로 탭이 활성화되면 CLOSED 상태에서 재연결한다', () => {
-      const { manager } = createManager({ autoReconnect: true, reconnectionAttempts: 1 });
+      const { manager } = createManager({ reconnectionAttempts: 1 });
       manager.connect();
       lastWs().simulateOpen();
 
@@ -425,8 +452,11 @@ describe('SocketManager', () => {
       expect(MockWebSocket.instances.length).toBe(prevCount + 1);
     });
 
-    it('autoReconnect=false면 브라우저 이벤트가 재연결을 트리거하지 않는다', () => {
-      const { manager } = createManager({ autoReconnect: false, reconnectionAttempts: 0 });
+    it('reconnect 옵션 없이 생성하면 브라우저 이벤트가 재연결을 트리거하지 않는다', () => {
+      // reconnect 옵션을 생략 → bindBrowserEvents 미호출
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager({ url: 'ws://localhost' }, emitter);
+
       manager.connect();
       lastWs().simulateOpen();
       lastWs().simulateClose(1006, '', false);
@@ -439,20 +469,134 @@ describe('SocketManager', () => {
     });
 
     it('retry 대기 중 visibilitychange 발생 시 타이머를 취소하고 즉시 재연결한다', () => {
-      const { manager } = createManager({ autoReconnect: true });
+      const { manager } = createManager();
       manager.connect();
       lastWs().simulateOpen();
-      lastWs().simulateClose(1006, '', false); // retry 타이머 설정, state=CLOSED
+      lastWs().simulateClose(1006, '', false);
 
-      // 타이머 만료 전에 탭 활성화
       Object.defineProperty(document, 'visibilityState', { value: 'visible', configurable: true });
       document.dispatchEvent(new Event('visibilitychange'));
 
-      // 타이머 없이도 즉시 새 연결
       expect(MockWebSocket.instances).toHaveLength(2);
-      // 취소된 타이머가 만료돼도 추가 연결 없음
       vi.runAllTimers();
       expect(MockWebSocket.instances).toHaveLength(2);
+    });
+  });
+
+  describe('heartbeat (콜백 방식)', () => {
+    it('소켓이 열릴 때 heartbeat 콜백이 호출된다', () => {
+      const heartbeat = vi.fn();
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager({ url: 'ws://localhost', heartbeat }, emitter);
+
+      manager.connect();
+      lastWs().simulateOpen();
+
+      expect(heartbeat).toHaveBeenCalledOnce();
+    });
+
+    it('ctx.send()로 WebSocket에 데이터를 전송할 수 있다', () => {
+      let capturedCtx: HeartbeatContext | null = null;
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager(
+        {
+          url: 'ws://localhost',
+          heartbeat: (ctx) => {
+            capturedCtx = ctx;
+          },
+        },
+        emitter,
+      );
+
+      manager.connect();
+      lastWs().simulateOpen();
+      capturedCtx!.send('ping');
+
+      expect(lastWs().send).toHaveBeenCalledWith('ping');
+    });
+
+    it('ctx.onMessage()로 메시지를 구독할 수 있다', () => {
+      const onMessage = vi.fn();
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager(
+        {
+          url: 'ws://localhost',
+          heartbeat: (ctx) => {
+            ctx.onMessage(onMessage);
+          },
+        },
+        emitter,
+      );
+
+      manager.connect();
+      lastWs().simulateOpen();
+      lastWs().simulateMessage('pong');
+
+      expect(onMessage).toHaveBeenCalledOnce();
+    });
+
+    it('ctx.reconnect()를 호출하면 소켓을 끊고 재연결한다', () => {
+      let capturedCtx: HeartbeatContext | null = null;
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager(
+        {
+          url: 'ws://localhost',
+          reconnect: { delay: 0, delayMax: 0, factor: 0 },
+          heartbeat: (ctx) => {
+            capturedCtx = ctx;
+          },
+        },
+        emitter,
+      );
+
+      manager.connect();
+      lastWs().simulateOpen();
+      capturedCtx!.reconnect();
+
+      expect(manager.state).toBe(ConnectionState.CLOSING);
+    });
+
+    it('소켓이 닫힐 때 heartbeat cleanup 함수가 호출된다', () => {
+      const cleanup = vi.fn();
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager(
+        {
+          url: 'ws://localhost',
+          heartbeat: () => cleanup,
+        },
+        emitter,
+      );
+
+      manager.connect();
+      lastWs().simulateOpen();
+      manager.close();
+      lastWs().simulateClose(1000, '', true);
+
+      expect(cleanup).toHaveBeenCalledOnce();
+    });
+
+    it('heartbeat onMessage 구독자는 message 이벤트로 emit되지 않는다 (구독 후 unsubscribe 시)', () => {
+      const heartbeatMsg = vi.fn();
+      const externalMsg = vi.fn();
+      const emitter = new EventEmitter<SocketEventMap>();
+      const manager = new SocketManager(
+        {
+          url: 'ws://localhost',
+          heartbeat: (ctx) => {
+            ctx.onMessage(heartbeatMsg);
+          },
+        },
+        emitter,
+      );
+      emitter.on('message', externalMsg);
+
+      manager.connect();
+      lastWs().simulateOpen();
+      lastWs().simulateMessage('data');
+
+      // heartbeat onMessage는 호출되지만 외부 message 이벤트도 함께 emit됨
+      expect(heartbeatMsg).toHaveBeenCalledOnce();
+      expect(externalMsg).toHaveBeenCalledOnce();
     });
   });
 });
